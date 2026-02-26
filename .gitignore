@@ -2,3 +2,5 @@
 resources/config.yaml
 resource/config
 resource/config/
+.idea
+.vscode

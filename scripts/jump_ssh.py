@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-jump-ssh: 通过 JumpServer 堡垒机在指定服务器上执行命令
+jump-ssh: 通过 JumpServer 直连目标服务器执行命令
 
 用法:
     python jump_ssh.py list                              # 列出白名单中的服务器
     python jump_ssh.py exec --host VM-4-13 --cmd "ls"  # 在指定服务器执行命令
-    python jump_ssh.py exec --host VM-4-13 --cmd "ls" --workdir /opt/app
 """
 
 import argparse
@@ -15,29 +14,22 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Union
 
-import pexpect
+import paramiko
 import yaml
 
 # ─── 默认配置路径 ────────────────────────────────────────────────────────────
 SKILL_DIR = Path(__file__).parent.parent
 DEFAULT_CONFIG = SKILL_DIR / "resources" / "config.yaml"
 
-# JumpServer 交互提示符
-PROMPT_OPT = "Opt>"                          # 主菜单提示符
-PROMPT_HOST = "[Host]>"                      # 多结果选择提示符
-PROMPT_SEARCH = "Search:"                    # 资产列表搜索提示符
-PROMPT_SHELL = [r"\$\s*$", r"#\s*$"]        # 目标机器 shell 提示符（正则）
-PROMPT_PASSWORD = "password:"
-
+# 目标机器 shell 提示符（正则）
+PROMPT_SHELL = [r"\$\s*$", r"#\s*$"]
 
 def fatal(msg: str):
     print(json.dumps({"success": False, "error": msg}), flush=True)
     sys.exit(1)
 
-
-# ─── 配置加载 ────────────────────────────────────────────────────────────────
 def load_config(config_path: Optional[str] = None) -> dict:
     path = Path(config_path) if config_path else DEFAULT_CONFIG
     if not path.exists():
@@ -46,172 +38,147 @@ def load_config(config_path: Optional[str] = None) -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
-
-# ─── 白名单校验 ──────────────────────────────────────────────────────────────
 def resolve_host(name: str, allowed_hosts: list) -> Optional[dict]:
     for h in allowed_hosts:
-        if h["name"].lower() == name.lower() or h["match"].lower() == name.lower():
+        if h["name"].lower() == name.lower():
             return h
     return None
 
+# ─── 核心：Paramiko 会话包装器 (直连版) ──────────────────────────────────────
+class ParamikoExpect:
+    """A minimal expect-like wrapper around a paramiko Channel."""
+    def __init__(self, chan: paramiko.Channel):
+        self.chan = chan
+        self.buffer = ""
+        self.before = ""
 
-# ─── 核心：pexpect SSH 会话 ──────────────────────────────────────────────────
-class JumpSession:
-    """
-    使用 pexpect 驱动系统 ssh 命令，自动化 JumpServer 交互式菜单。
-    直接调用本机 ssh，终端环境天然正确，无 paramiko PTY 兼容问题。
-    """
+    def expect(self, patterns: Union[str, List[str]], timeout: float = 15.0) -> int:
+        self.chan.settimeout(timeout)
+        if isinstance(patterns, str):
+            patterns = [patterns]
+        
+        compiled_patterns = [re.compile(p) for p in patterns]
+        
+        start = time.time()
+        while True:
+            for idx, p in enumerate(compiled_patterns):
+                match = p.search(self.buffer)
+                if match:
+                    self.before = self.buffer[:match.start()]
+                    self.buffer = self.buffer[match.end():]
+                    return idx
 
-    def __init__(self, cfg: dict):
+            if time.time() - start > timeout:
+                raise TimeoutError(f"Timeout waiting for {patterns}. Buffer: {self.buffer}")
+
+            try:
+                chunk = self.chan.recv(4096)
+                if not chunk:
+                    raise EOFError("Channel closed by remote")
+                self.buffer += chunk.decode('utf-8', 'replace')
+            except paramiko.socket.timeout:
+                raise TimeoutError(f"Socket timeout waiting for {patterns}. Buffer: {self.buffer}")
+
+class ParamikoJumpSession:
+    """
+    使用 Paramiko 通过 JumpServer 直连目标服务器建立交互式命令会话。
+    原理：认证用户名拼装为 "堡垒机用户@目标机器用户@目标机器IP"
+    大大简化了原来繁琐的菜单交互过程。
+    """
+    def __init__(self, cfg: dict, target_ip: str, target_user: str):
         js = cfg["jumpserver"]
         self.host = js["host"]
         self.port = int(js["port"])
-        self.user = js["user"]
-        self.password = js["password"]
-        self.t_connect = cfg.get("timeout", {}).get("connect", 15)
-        self.t_expect = cfg.get("timeout", {}).get("expect", 15)
-        self.t_cmd = cfg.get("timeout", {}).get("command", 60)
-        self._child: Optional[pexpect.spawn] = None
+        self.js_user = js["user"]
+        self.password = js.get("password")  # 可选，如果为空则 paramiko 默认尝试已加载的密钥
+        
+        # 组装直连 JumpServer 的混合用户名
+        self.direct_user = f"{self.js_user}@{target_user}@{target_ip}"
+        
+        timeouts = cfg.get("timeout", {})
+        self.t_connect = timeouts.get("connect", 15)
+        self.t_expect = timeouts.get("expect", 15)
+        self.t_cmd = timeouts.get("command", 60)
+        
+        self.client = paramiko.SSHClient()
+        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self.chan: Optional[paramiko.Channel] = None
+        self.pexpect: Optional[ParamikoExpect] = None
 
     def connect(self):
-        """启动 ssh 进程并登录 JumpServer"""
-        ssh_cmd = (
-            f"ssh -p {self.port} "
-            f"-o StrictHostKeyChecking=no "
-            f"-o UserKnownHostsFile=/dev/null "
-            f"-o ConnectTimeout={self.t_connect} "
-            f"{self.user}@{self.host}"
-        )
-        self._child = pexpect.spawn(
-            ssh_cmd,
-            encoding="utf-8",
-            codec_errors="replace",
-            timeout=self.t_connect,
-            dimensions=(50, 220),
-        )
-
-        # 处理密码认证
-        idx = self._child.expect([PROMPT_PASSWORD, PROMPT_OPT, pexpect.TIMEOUT, pexpect.EOF],
-                                  timeout=self.t_connect)
-        if idx == 0:
-            self._child.sendline(self.password)
-            self._child.expect(PROMPT_OPT, timeout=self.t_expect)
-        elif idx == 1:
-            pass  # 已经到菜单了（key 认证）
-        else:
-            raise RuntimeError(f"SSH 连接失败，输出:\n{self._child.before}")
-
-        # JumpServer 在显示 Opt> 后会做一次 ANSI 擦除并重绘（\x1b[5D\x1b[KOpt>）
-        # 等待这个双重渲染稳定，避免在 JumpServer 还没就绪时就发送命令
-        self._drain_prompt()
-
-    def _drain_prompt(self):
-        """
-        消耗掉 JumpServer 的双重 Opt> 渲染，确保提示符完全稳定。
-        JumpServer 输出 Opt> 后会用 ANSI 码擦除并重绘，第一个 expect("Opt>")
-        只匹配了第一次，这里消耗掉后续可能的重绘。
-        """
-        child = self._child
-        # 短暂等待，消耗剩余的 ANSI 输出（如果有）
         try:
-            child.expect(PROMPT_OPT, timeout=1.5)  # 消耗第二次 Opt>
-        except pexpect.TIMEOUT:
-            pass  # 只有一次渲染也没关系
-        time.sleep(0.3)  # 额外 buffer，确保服务端稳定
+            self.client.connect(
+                hostname=self.host,
+                port=self.port,
+                username=self.direct_user, # 关键：使用直连模式的用户名
+                password=self.password,
+                timeout=self.t_connect,
+                look_for_keys=True,        # 允许搜索本地 ~/.ssh/id_rsa 等私钥
+                allow_agent=True           # 允许使用 ssh-agent
+            )
+            # 使用 invoke_shell 来激活 PTY 环境，兼容许多目标机器的环境及堡垒机的审计强制要求
+            self.chan = self.client.invoke_shell(term='xterm', width=200, height=200)
+            self.pexpect = ParamikoExpect(self.chan)
+            
+            # 由于是直连模式，连上后直接就是目标机器的 shell，不再有 Opt> 菜单
+            time.sleep(1.0)
+            self.chan.send("\r")
+            self.pexpect.expect(PROMPT_SHELL, timeout=self.t_expect)
+            
+        except Exception as e:
+            raise RuntimeError(f"JumpServer 直连到目标机器失败 (账户: {self.direct_user}): {e}")
 
     def close(self):
-        if self._child:
-            try:
-                self._child.close(force=True)
-            except Exception:
-                pass
+        if self.chan:
+            self.chan.close()
+        self.client.close()
 
-    def select_and_exec(self, match_keyword: str, command: str) -> str:
-        """
-        在 JumpServer 搜索目标机器，连接后执行命令，返回命令输出。
-        """
-        child = self._child
+    def select_and_exec(self, command: str) -> str:
+        chan = self.chan
+        px = self.pexpect
 
-        # 步骤1: 在稳定的 Opt> 发送搜索关键词（使用 send 而非 sendline，JumpServer 单字符模式）
-        child.send(match_keyword + "\r")
-
-        # 步骤2: 等待结果 —— 可能直连进去($/#)，可能需要选择([Host]>)，可能多个结果(Search:)
-        shell_patterns = [r"\$\s", r"#\s"]
-        patterns = [PROMPT_HOST, PROMPT_SEARCH, PROMPT_OPT] + shell_patterns
-        idx = child.expect(patterns, timeout=self.t_expect)
-
-        if idx == 0:
-            # [Host]> 有多个匹配，选第一个
-            child.send("1\r")
-            idx2 = child.expect(shell_patterns + [pexpect.TIMEOUT], timeout=self.t_expect)
-            if idx2 >= len(shell_patterns):
-                raise RuntimeError(f"选择机器后未进入 shell，输出:\n{child.before}")
-        elif idx == 1:
-            # Search: 在资产列表的搜索框，再发一次关键词
-            child.send(match_keyword + "\r")
-            idx3 = child.expect(shell_patterns + [PROMPT_HOST, pexpect.TIMEOUT], timeout=self.t_expect)
-            if idx3 == len(shell_patterns):   # [Host]>
-                child.send("1\r")
-                child.expect(shell_patterns, timeout=self.t_expect)
-            elif idx3 > len(shell_patterns):
-                raise RuntimeError(f"搜索后超时，输出:\n{child.before}")
-        elif idx == 2:
-            # 回到 Opt>，说明没找到
-            raise RuntimeError(f"JumpServer 未找到匹配 '{match_keyword}' 的机器，请检查 match 关键词")
-        # idx >= 3：直接进入 shell
-
-        # 步骤3: 等待 shell 完全就绪（有时连接成功后还有欢迎信息，等其稳定）
-        time.sleep(1.0)
-        child.sendline("")   # 发一个空行触发提示符刷新
-        # 等待出现 shell 提示符，flush 掉欢迎信息
-        child.expect([r"\$\s*\r?\n", r"#\s*\r?\n", pexpect.TIMEOUT], timeout=8)
-
-        # 步骤4: 执行命令，用唯一标记包裹
-        # 使用经典技巧：发送 "echo 'JUMP_END_''12345'" 
-        # 这样回显行里没有完整的连续字符串，而实际输出会拼成 "JUMP_END_12345"
+        # 1. 发送并执行命令
         ts = int(time.time())
         end_marker = f"JUMP_END_{ts}"
-        # 拆分为两部分
         part1 = "JUMP_END_"
         part2 = str(ts)
-        full_cmd = f"{command}; echo '{part1}''{part2}'"
-        child.sendline(full_cmd)
-
-        # 步骤5: 等待命令完成（匹配唯一的真实输出）
-        child.expect(re.escape(end_marker), timeout=self.t_cmd)
-
-        # 步骤6: 提取输出（before 是 end_marker 之前的内容）
-        raw = child.before or ""
+        full_cmd = f"{command}; echo '{part1}''{part2}'\r"
+        
+        chan.send(full_cmd)
+        
+        # 2. 等待回显标记
+        px.expect(re.escape(end_marker), timeout=self.t_cmd)
+        
+        # 提取结果
+        raw = px.before or ""
         return self._clean(raw)
-
 
     @staticmethod
     def _clean(raw: str) -> str:
-        """清理 ANSI 转义码和回车符"""
         ansi = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\[[0-9;]*m|\r")
         cleaned = ansi.sub("", raw)
-        # 去掉空行，strip 首尾空白
         lines = [line for line in cleaned.split("\n") if line.strip()]
-        # 第一行通常是命令回显（echo），跳过
         if lines:
+            # 第一行通常是命令回显（echo），跳过
             lines = lines[1:]
         return "\n".join(lines).strip()
 
-
 # ─── 子命令处理 ──────────────────────────────────────────────────────────────
-
 def cmd_list(cfg: dict):
     allowed = cfg.get("allowed_hosts", [])
     if not allowed:
         fatal("配置文件中 allowed_hosts 为空")
     result = []
     for h in allowed:
-        info = {"name": h["name"], "match": h["match"]}
+        info = {
+            "name": h["name"], 
+            "ip": h.get("ip", ""),
+            "user": h.get("user", "root")
+        }
         if "default_workdir" in h:
             info["default_workdir"] = h["default_workdir"]
         result.append(info)
     print(json.dumps({"success": True, "hosts": result}, ensure_ascii=False, indent=2))
-
 
 def cmd_exec(cfg: dict, host_name: str, command: str, workdir: Optional[str] = None):
     allowed = cfg.get("allowed_hosts", [])
@@ -220,20 +187,27 @@ def cmd_exec(cfg: dict, host_name: str, command: str, workdir: Optional[str] = N
         available = [h["name"] for h in allowed]
         fatal(f"服务器 '{host_name}' 不在允许列表中。可用: {available}")
 
+    target_ip = host.get("ip")
+    if not target_ip:
+        fatal(f"配置错误: '{host_name}' 缺少 ip 字段 (自系统升级直连模式后，强制要求提供 ip)")
+        
+    target_user = host.get("user", "root")
+
     if not workdir and "default_workdir" in host:
         workdir = host["default_workdir"]
 
     if workdir:
         command = f"cd {workdir} && {command}"
 
-    session = JumpSession(cfg)
+    session = ParamikoJumpSession(cfg, target_ip, target_user)
     try:
         session.connect()
-        output = session.select_and_exec(host["match"], command)
+        output = session.select_and_exec(command)  # 直接传递指令，跳过了菜单选择!
         print(json.dumps({
             "success": True,
             "host": host["name"],
-            "match": host["match"],
+            "ip": target_ip,
+            "user": target_user,
             "workdir": workdir,
             "command": command,
             "output": output,
@@ -246,7 +220,6 @@ def cmd_exec(cfg: dict, host_name: str, command: str, workdir: Optional[str] = N
         fatal(f"未知错误: {type(e).__name__}: {e}")
     finally:
         session.close()
-
 
 # ─── CLI 入口 ────────────────────────────────────────────────────────────────
 def main():
@@ -268,7 +241,6 @@ def main():
         cmd_list(cfg)
     elif args.subcommand == "exec":
         cmd_exec(cfg, args.host, args.cmd, args.workdir)
-
 
 if __name__ == "__main__":
     main()

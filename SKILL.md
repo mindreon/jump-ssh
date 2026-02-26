@@ -22,15 +22,16 @@ cp .agents/skills/jump-ssh/resources/config.example.yaml \
 
 ```yaml
 jumpserver:
-  host: "183.36.30.86"
+  host: "10.0.0.1"
   port: 2222
   user: "your-username"
   password: "your-password"
 
-# 只有列在这里的服务器才能被访问
+# 允许 Agent 访问的服务器白名单
 allowed_hosts:
   - name: "VM-4-13"
-    match: "4.13"        # JumpServer 搜索关键词（IP 或主机名片段）
+    ip: "192.168.1.100"   # 目标机器的内网IP或直连主机名
+    user: "root"         # 登录目标机器的用户名
     default_workdir: "~/falsework" # 默认工作目录（可选），未指定 --workdir 时会进入此目录
 ```
 
@@ -55,8 +56,8 @@ python .agents/skills/jump-ssh/scripts/jump_ssh.py list
 {
   "success": true,
   "hosts": [
-    {"name": "VM-4-13", "match": "4.13"},
-    {"name": "jenkins-arm", "match": "192.168.4.25"}
+    {"name": "VM-4-13", "ip": "192.168.1.100", "user": "root"},
+    {"name": "jenkins-arm", "ip": "192.168.1.102", "user": "root"}
   ]
 }
 ```
@@ -80,7 +81,8 @@ python .agents/skills/jump-ssh/scripts/jump_ssh.py exec \
 {
   "success": true,
   "host": "VM-4-13",
-  "match": "4.13",
+  "ip": "192.168.1.100",
+  "user": "root",
   "workdir": "/opt/myapp",
   "command": "cd /opt/myapp && ls && cat config.yaml",
   "output": "..."
@@ -110,20 +112,21 @@ python .agents/skills/jump-ssh/scripts/jump_ssh.py \
 因为开启了 `default_workdir` 的支持，如果未传 `--workdir` 参数，它默认会先进入对应的路径。
 
 ```bash
-# 启动服务
+# 启动服务 (需指定服务名，例如 api-service)
 python .agents/skills/jump-ssh/scripts/jump_ssh.py exec \
   --host "VM-4-13" \
-  --cmd "./run.sh start"
+  --cmd "./run.sh start <service_name>"
 
 # 停止服务
 python .agents/skills/jump-ssh/scripts/jump_ssh.py exec \
   --host "VM-4-13" \
-  --cmd "./run.sh stop"
+  --cmd "./run.sh stop <service_name>"
 
 # 重启服务（通常在代码更新后使用）
+# 推荐先执行 git pull 更新部署脚本（假设环境已配置好 git ssh 权限）
 python .agents/skills/jump-ssh/scripts/jump_ssh.py exec \
   --host "VM-4-13" \
-  --cmd "./run.sh restart"
+  --cmd "git pull && ./run.sh restart <service_name>"
 ```
 
 ---
@@ -135,6 +138,7 @@ python .agents/skills/jump-ssh/scripts/jump_ssh.py exec \
 | `--host` | 目标服务器名称，必须与 `allowed_hosts[].name` 完全匹配（不区分大小写） |
 | `--cmd` | 在目标服务器执行的 shell 命令 |
 | `--config` | 配置文件路径（可选，默认使用 `resources/config.yaml`） |
+| `--workdir` | 工作目录（可选，若未指定则优先尝试读取配置中的 `default_workdir`） |
 
 ---
 

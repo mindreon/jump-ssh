@@ -2,19 +2,22 @@ jumpserver:
   host: "192.168.3.1"
   port: 22222
   user: "your-username"
-  password: "your-password"
+#  password: "your-password"
 
 # 允许 Agent 访问的服务器白名单（必须配置，不在列表内的服务器拒绝访问）
 allowed_hosts:
-  - name: "VM-4-13"           # 显示名称（任意）
-    match: "4.13"             # 在 JumpServer 搜索框输入的关键词（IP 或主机名）
+  - name: "VM-4-13" # 显示名称（任意）
+    ip: "192.168.1.100" # 目标机器的内网IP或直连主机名
+    user: "root" # 登录目标机器的用户名（堡垒机直连时拼接，如 root）
     default_workdir: "~/falsework" # 默认工作目录（可选），未指定 --workdir 时会进入此目录
   - name: "IDC-2080"
-    match: "192.168.4.10"
+    ip: "192.168.1.101"
+    user: "root"
   - name: "jenkins-arm"
-    match: "192.168.4.25"
+    ip: "192.168.1.102"
+    user: "root"
 
 timeout:
-  connect: 15     # SSH 连接超时（秒）
-  expect: 10      # 等待 JumpServer 交互响应超时（秒）
-  command: 60     # 单条命令执行超时（秒）
+  connect: 15 # SSH 连接超时（秒）
+  expect: 10 # 等待 JumpServer 交互响应超时（秒）
+  command: 60 # 单条命令执行超时（秒）
