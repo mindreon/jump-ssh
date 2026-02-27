@@ -9,8 +9,9 @@ jump-ssh: 通过 JumpServer 直连目标服务器执行命令
 
 import argparse
 import json
-import os
 import re
+import shlex
+import socket
 import sys
 import time
 from pathlib import Path
@@ -76,7 +77,7 @@ class ParamikoExpect:
                 if not chunk:
                     raise EOFError("Channel closed by remote")
                 self.buffer += chunk.decode('utf-8', 'replace')
-            except paramiko.socket.timeout:
+            except socket.timeout:
                 raise TimeoutError(f"Socket timeout waiting for {patterns}. Buffer: {self.buffer}")
 
 class ParamikoJumpSession:
@@ -151,16 +152,30 @@ class ParamikoJumpSession:
         
         # 提取结果
         raw = px.before or ""
-        return self._clean(raw)
+        return self._clean(raw, command)
 
     @staticmethod
-    def _clean(raw: str) -> str:
+    def _clean(raw: str, command: str) -> str:
         ansi = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\[[0-9;]*m|\r")
         cleaned = ansi.sub("", raw)
         lines = [line for line in cleaned.split("\n") if line.strip()]
         if lines:
-            # 第一行通常是命令回显（echo），跳过
-            lines = lines[1:]
+            # 仅在第一行看起来是命令回显时跳过，避免误删真实输出
+            first = lines[0].strip()
+            cmd = command.strip()
+            if first == cmd or first.endswith(cmd):
+                lines = lines[1:]
+        if lines:
+            # 去掉可能残留的 marker 前缀命令回显
+            marker_idx = next((i for i, line in enumerate(lines) if "JUMP_END_" in line), None)
+            if marker_idx == 0:
+                lines = lines[1:]
+            elif marker_idx is not None:
+                lines = lines[:marker_idx]
+        if lines:
+            # 防止末尾仅保留提示符
+            if re.match(r"^[^\\n]*[#$]\\s*$", lines[-1].strip()):
+                lines = lines[:-1]
         return "\n".join(lines).strip()
 
 # ─── 子命令处理 ──────────────────────────────────────────────────────────────
@@ -197,7 +212,7 @@ def cmd_exec(cfg: dict, host_name: str, command: str, workdir: Optional[str] = N
         workdir = host["default_workdir"]
 
     if workdir:
-        command = f"cd {workdir} && {command}"
+        command = f"cd {shlex.quote(workdir)} && {command}"
 
     session = ParamikoJumpSession(cfg, target_ip, target_user)
     try:

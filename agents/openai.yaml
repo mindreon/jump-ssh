@@ -1,0 +1,3 @@
+interface:
+  display_name: "Jump SSH"
+  short_description: "通过 JumpServer 白名单执行远程命令"
