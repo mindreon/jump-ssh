@@ -87,7 +87,50 @@ SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
   exec --host "VM-4-13" --cmd "uname -a"
 ```
 
-### 4. 服务启停与部署
+### 4. 标准发版流程（本地构建镜像 + 远程发布）
+
+用于“代码已修改，需要快速发版到开发环境”的场景。默认按以下顺序执行，避免只重启服务但镜像未更新：
+
+1. 在本地目标项目目录确认镜像构建/推送方式（先看 `Makefile`，不要硬编码目标）。
+2. 执行该项目的构建并推送镜像命令（通常是 `make <target>`）。
+3. 在 `falsework` 仓库更新对应服务部署脚本/镜像 tag。
+4. 使用 jump-ssh 到目标机器拉取最新 `falsework` 并重启服务。
+
+建议先做最小检查：
+
+```bash
+# 在项目根目录识别可用目标（按项目实际 Makefile 为准）
+rg -n "^(\.PHONY:|[a-zA-Z0-9_.-]+:)" Makefile
+rg -n "image|docker|build|push|publish" Makefile
+```
+
+本地构建推送（示例，目标名以项目 Makefile 为准）：
+
+```bash
+cd <project_dir>
+make <build-and-push-target>
+```
+
+更新 falsework 并远程发布（示例）：
+
+```bash
+# 1) 本地更新 falsework 部署脚本中的镜像 tag
+cd <falsework_dir>
+# 编辑对应部署文件，提交到目标分支
+
+# 2) 远程主机拉取并重启
+SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" exec \
+  --host "VM-4-13" \
+  --workdir "~/falsework" \
+  --cmd "git pull && ./run.sh restart <service_name>"
+```
+
+执行约束：
+- 发版请求默认包含“构建推送镜像 -> 更新 falsework -> 远程重启”全链路。
+- 若用户只要求“重启服务”，才跳过前置构建与部署脚本更新。
+
+### 5. 服务启停与部署
 
 如果在目标服务器上配置了 `default_workdir`，且未传 `--workdir`，会先进入该目录。
 
