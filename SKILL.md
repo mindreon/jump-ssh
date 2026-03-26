@@ -59,7 +59,7 @@ SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
 "${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" list
 ```
 
-### 2. 在指定服务器上执行命令
+### 2. 在指定服务器上执行命令（无状态）
 
 ```bash
 SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
@@ -67,6 +67,11 @@ SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
   --host "VM-4-13" \
   --cmd "df -h"
 ```
+
+说明：
+- 每次调用都会新建并关闭一次远端 shell。
+- 适合单条命令、稳定自动化场景。
+- 输出包含 `output`，并额外带 `exit_code`。
 
 指定工作目录：
 
@@ -86,6 +91,53 @@ SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
   --config /custom/path/config.yaml \
   exec --host "VM-4-13" --cmd "uname -a"
 ```
+
+### 3.1 持久 session 模式
+
+适合需要保留 `cd`、环境变量、shell 上下文的连续命令场景。
+
+启动 session：
+
+```bash
+SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-start \
+  --host "VM-4-13"
+```
+
+返回结果里会包含 `session_id`。
+
+在同一个 session 中连续执行：
+
+```bash
+SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-exec \
+  --session "<session_id>" \
+  --cmd "cd /tmp && pwd"
+
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-exec \
+  --session "<session_id>" \
+  --cmd "pwd"
+```
+
+列出当前活跃 session：
+
+```bash
+SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-list
+```
+
+关闭 session：
+
+```bash
+SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-close \
+  --session "<session_id>"
+```
+
+说明：
+- `session-*` 通过本地 Unix socket daemon 维持远端终端，不会在每次调用后断开。
+- 输出仍然是 JSON，但只保留最小元信息：`session_id`、`output`、`exit_code`、`alive`。
+- 更适合排障、探索式操作、依赖上下文的连续命令。
 
 ### 4. 标准发版流程（本地构建镜像 + 远程发布）
 
@@ -161,9 +213,11 @@ SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
 | `--cmd` | 在目标服务器执行的 shell 命令 |
 | `--config` | 配置文件路径（可选，默认使用 `resources/config.yaml`） |
 | `--workdir` | 工作目录（可选；未指定时优先使用 `default_workdir`） |
+| `--session` | 持久 session ID（仅 `session-exec` / `session-close` 使用） |
 
 ## 安全约束
 
 - `--host` 必须在 `config.yaml` 的 `allowed_hosts` 中，否则报错。
 - Agent 不能自行发现服务器，只能访问用户配置的白名单。
 - 敏感凭据保存在本地 `config.yaml` 中。
+- `session-*` 模式会在本地保留常驻 daemon；用完应调用 `session-close` 回收会话。
