@@ -12,6 +12,7 @@ jump-ssh: 通过 JumpServer 直连目标服务器执行命令
 
 import argparse
 import hashlib
+import importlib
 import json
 import re
 import shlex
@@ -371,6 +372,39 @@ class SessionServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             return {"success": False, "error": str(exc)}
 
 
+class RemoteCompletedProcess:
+    def __init__(self, returncode: int, stdout: str, stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class RemoteCommandRunner:
+    def __init__(self, cfg: dict[str, Any], host_name: str):
+        self.cfg = cfg
+        self.host_name = host_name
+
+    def __call__(self, cmd, capture_output=True, text=True, check=False):
+        del capture_output, text, check
+
+        _, target_ip, target_user, _ = lookup_host(self.cfg, self.host_name)
+        session = SSHJumpSession(self.cfg, target_ip, target_user)
+        try:
+            session.connect()
+            result = session.exec_command(shlex.join(cmd))
+        finally:
+            session.close()
+
+        output = result.get("output", "")
+        exit_code = result.get("exit_code") or 0
+        stderr = output if exit_code != 0 else ""
+        return RemoteCompletedProcess(returncode=exit_code, stdout=output, stderr=stderr)
+
+
+class RemoteKubectlRunner(RemoteCommandRunner):
+    pass
+
+
 def socket_path_for_config(config_path: Optional[str]) -> Path:
     resolved = f"{resolved_config_path(config_path)}::{SESSION_PROTOCOL_VERSION}"
     digest = hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
@@ -545,6 +579,131 @@ def cmd_serve(cfg: dict[str, Any], socket_path: str) -> None:
             path.unlink()
 
 
+def resolve_woodpecker_watch_dir(
+    cfg: dict[str, Any],
+    explicit_dir: Optional[str],
+    cwd: Optional[Path] = None,
+) -> Path:
+    candidates: list[Path] = []
+    if explicit_dir:
+        candidates.append(Path(explicit_dir))
+
+    tools_cfg = cfg.get("tools", {})
+    configured_dir = tools_cfg.get("woodpecker_watch_dir")
+    if configured_dir:
+        candidates.append(Path(configured_dir))
+
+    base_dir = cwd.resolve() if cwd else Path.cwd().resolve()
+    candidates.append(base_dir / "woodpecker-watch")
+
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if (resolved / "woodpecker_watch").is_dir():
+            return resolved
+
+    raise ValueError(
+        "未找到 woodpecker-watch 项目目录。请通过 --watch-dir 指定，或在配置文件中设置 tools.woodpecker_watch_dir"
+    )
+
+
+def resolve_woodpecker_verify_host(cfg: dict[str, Any], explicit_host: Optional[str]) -> str:
+    if explicit_host:
+        lookup_host(cfg, explicit_host)
+        return explicit_host
+
+    allowed_hosts = cfg.get("allowed_hosts", [])
+    if len(allowed_hosts) == 1:
+        return allowed_hosts[0]["name"]
+
+    raise ValueError("woodpecker-verify 需要 --host，或配置中只能存在一个 allowed_hosts")
+
+
+def load_woodpecker_watch_modules(watch_dir: Path) -> dict[str, Any]:
+    watch_dir_str = str(watch_dir)
+    if watch_dir_str not in sys.path:
+        sys.path.insert(0, watch_dir_str)
+
+    return {
+        "models": importlib.import_module("woodpecker_watch.models"),
+        "watch_service": importlib.import_module("woodpecker_watch.watch_service"),
+        "woodpecker_client": importlib.import_module("woodpecker_watch.woodpecker_client"),
+        "kube_client": importlib.import_module("woodpecker_watch.kube_client"),
+        "registry_client": importlib.import_module("woodpecker_watch.registry_client"),
+    }
+
+
+def build_watch_config(cfg: dict[str, Any], models: Any) -> Any:
+    try:
+        woodpecker_cfg = cfg["woodpecker"]
+        defaults_cfg = cfg["defaults"]
+        image_cfg = cfg["image"]
+    except KeyError as exc:
+        raise ValueError(
+            "缺少 woodpecker-watch 配置。需要配置 woodpecker / defaults / image 段"
+        ) from exc
+    kubernetes_cfg = cfg.get("kubernetes", {})
+
+    return models.AppConfig(
+        woodpecker=models.WoodpeckerConfig(
+            server=woodpecker_cfg["server"],
+            token=woodpecker_cfg["token"],
+        ),
+        kubernetes=models.KubernetesConfig(
+            kubectl_context=kubernetes_cfg.get("kubectlContext"),
+        ),
+        defaults=models.DefaultsConfig(
+            namespace=defaults_cfg["namespace"],
+            timeout_seconds=defaults_cfg["timeoutSeconds"],
+            poll_interval_seconds=defaults_cfg["pollIntervalSeconds"],
+        ),
+        image=models.ImageConfig(
+            repository_template=image_cfg["repositoryTemplate"],
+        ),
+    )
+
+
+def run_woodpecker_verify(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    watch_dir = resolve_woodpecker_watch_dir(cfg, args.watch_dir)
+    host_name = resolve_woodpecker_verify_host(cfg, getattr(args, "host", None))
+    modules = load_woodpecker_watch_modules(watch_dir)
+    models = modules["models"]
+    watch_config = build_watch_config(cfg, models)
+    service = modules["watch_service"].WatchService(
+        config=watch_config,
+        woodpecker_client=modules["woodpecker_client"].WoodpeckerClient(
+            server=watch_config.woodpecker.server,
+            token=watch_config.woodpecker.token,
+        ),
+        kube_client=modules["kube_client"].KubernetesClient(
+            runner=RemoteKubectlRunner(cfg, host_name),
+        ),
+        registry_client=modules["registry_client"].RegistryClient(
+            runner=RemoteCommandRunner(cfg, host_name),
+        ),
+    )
+    request = models.VerifyRequest(
+        repo=args.repo,
+        commit=args.commit,
+        namespace=args.namespace,
+        kubectl_context=args.kubectl_context,
+        deployment=args.deployment,
+        container=args.container,
+        timeout_seconds=args.timeout_seconds,
+        poll_interval_seconds=args.poll_interval_seconds,
+    )
+    result = service.verify(request)
+    if hasattr(result, "to_dict"):
+        return result.to_dict()
+    return dict(result)
+
+
+def cmd_woodpecker_verify(cfg: dict[str, Any], args: argparse.Namespace) -> None:
+    try:
+        print_json(run_woodpecker_verify(cfg, args))
+    except Exception as exc:
+        fatal(f"woodpecker 校验失败: {exc}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="通过 JumpServer 在指定服务器执行命令")
     parser.add_argument("--config", help="配置文件路径（默认: resources/config.yaml）")
@@ -569,6 +728,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     session_close = subparsers.add_parser("session-close", help="关闭 session")
     session_close.add_argument("--session", required=True, help="session ID")
+
+    watch_verify = subparsers.add_parser(
+        "woodpecker-verify",
+        help="校验指定 commit 的 Woodpecker 流水线和 Kubernetes 镜像是否已更新",
+    )
+    watch_verify.add_argument("--host", default=None, help="执行 kubectl 的目标服务器名称；未传时若白名单只有一台则自动使用")
+    watch_verify.add_argument("--repo", required=True, help="Woodpecker repo 全名，如 mindreon/agentic-service")
+    watch_verify.add_argument("--commit", required=True, help="要校验的 commit sha，支持前缀匹配")
+    watch_verify.add_argument("--namespace", default=None, help="Kubernetes namespace，可覆盖配置")
+    watch_verify.add_argument("--kubectl-context", default=None, help="kubectl context，可覆盖配置")
+    watch_verify.add_argument("--deployment", default=None, help="deployment 名，可覆盖默认 repo 尾段")
+    watch_verify.add_argument("--container", default=None, help="container 名，多容器场景建议显式指定")
+    watch_verify.add_argument("--timeout-seconds", type=int, default=None, help="轮询超时秒数，可覆盖配置")
+    watch_verify.add_argument(
+        "--poll-interval-seconds",
+        type=int,
+        default=None,
+        help="轮询间隔秒数，可覆盖配置",
+    )
+    watch_verify.add_argument(
+        "--watch-dir",
+        default=None,
+        help="woodpecker-watch 项目目录；未传时优先取配置 tools.woodpecker_watch_dir，再退回当前目录下的 woodpecker-watch",
+    )
 
     serve_parser = subparsers.add_parser("serve", help=argparse.SUPPRESS)
     serve_parser.add_argument("--socket-path", required=True, help=argparse.SUPPRESS)
@@ -606,6 +789,10 @@ def main() -> None:
 
     if args.subcommand == "session-close":
         cmd_session_close(args.config, args.session)
+        return
+
+    if args.subcommand == "woodpecker-verify":
+        cmd_woodpecker_verify(load_config(args.config), args)
         return
 
     parser.error(f"未知子命令: {args.subcommand}")

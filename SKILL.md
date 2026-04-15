@@ -205,6 +205,72 @@ SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
   --cmd "git pull && ./run.sh restart <service_name>"
 ```
 
+### 6. 校验 Woodpecker 与 Kubernetes 是否完成更新
+
+适合“代码已推送，不想本地构建镜像，希望 Agent 自动判断是否已经真正更新好”的场景。
+
+该命令会：
+
+1. 查找指定 `repo + commit` 对应的 Woodpecker 流水线
+2. 等待流水线结束并确认 `success`
+3. 在目标服务器上执行 `kubectl`，查询 deployment 对应 Pod 的实际 `imageID`
+4. 在目标服务器上执行 `docker manifest inspect`，获取目标 tag 当前的 manifest digest 集合
+5. 判断 Pod 的 `imageID` digest 是否命中目标 manifest digest
+
+前置配置：
+
+在 `config.yaml` 中补充以下配置段：
+
+```yaml
+tools:
+  woodpecker_watch_dir: "/mnt/data/code/mindreon/woodpecker-watch"
+
+woodpecker:
+  server: "https://woodpecker.example.com"
+  token: "your-woodpecker-token"
+
+kubernetes:
+  # 可选；不填时使用目标服务器上 kubectl 当前默认 context
+  kubectlContext: "prod-cluster"
+
+defaults:
+  namespace: "prod" # 目标 deployment 所在的 Kubernetes namespace
+  timeoutSeconds: 900
+  pollIntervalSeconds: 10
+
+image:
+  repositoryTemplate: "registry.example.com/{serviceName}"
+```
+
+调用方式：
+
+```bash
+SKILL_DIR="${AGENT_SKILL_DIR:-${AGENTS_HOME:-$HOME/.agents}/skills/jump-ssh}"
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" woodpecker-verify \
+  --repo "mindreon/agentic-service" \
+  --commit "abc1234"
+```
+
+可选覆盖：
+
+```bash
+"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" woodpecker-verify \
+  --repo "mindreon/agentic-service" \
+  --commit "abc1234" \
+  --namespace "prod" \
+  --deployment "agentic-service" \
+  --container "agentic-service" \
+  --watch-dir "/mnt/data/code/mindreon/woodpecker-watch"
+```
+
+说明：
+- 默认按 `repo` 最后一段推导 deployment 名
+- 默认按 Woodpecker 流水线分支/标签推导目标镜像 tag；例如 `release/v0.1.0 -> release-v0.1.0`
+- `defaults.namespace` 是目标 deployment 所在的 Kubernetes namespace
+- 不配置 `kubectlContext` 时，直接使用目标服务器上的 `kubectl` 默认 context
+- 若当前目录下存在 `woodpecker-watch` 项目目录，可不配 `tools.woodpecker_watch_dir`
+- 输出仍为 JSON，便于 Agent 继续解析
+
 ## 参数说明
 
 | 参数 | 说明 |

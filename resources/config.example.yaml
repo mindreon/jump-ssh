@@ -21,3 +21,24 @@ timeout:
   connect: 15 # SSH 连接超时（秒）
   expect: 10 # 等待 JumpServer 交互响应超时（秒）
   command: 60 # 单条命令执行超时（秒）
+
+# 可选：本地工具路径
+tools:
+  woodpecker_watch_dir: "/mnt/data/code/mindreon/woodpecker-watch"
+
+# 可选：给 woodpecker-verify 子命令复用的配置
+woodpecker:
+  server: "https://woodpecker.example.com"
+  token: "your-woodpecker-token"
+
+kubernetes:
+  # 可选；不填时使用目标服务器上 kubectl 当前默认 context
+  kubectlContext: "prod-cluster"
+
+defaults:
+  namespace: "prod"
+  timeoutSeconds: 900
+  pollIntervalSeconds: 10
+
+image:
+  repositoryTemplate: "registry.example.com/{serviceName}"
