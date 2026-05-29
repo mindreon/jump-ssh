@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import importlib
 import json
+import os
 import re
 import shlex
 import socket
@@ -26,7 +27,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-import pexpect
+if os.name == "nt":
+    pexpect = None  # type: ignore
+else:
+    import pexpect  # type: ignore
 import yaml
 
 SKILL_DIR = Path(__file__).parent.parent
@@ -91,16 +95,25 @@ class SSHJumpSession:
         self.js_user = js["user"]
         self.password = js.get("password")
         self.direct_user = f"{self.js_user}@{target_user}@{target_ip}"
+        self.target_ip = target_ip
+        self.target_user = target_user
+        self.target_selector = self._resolve_target_selector(cfg, target_ip, target_user)
 
         timeouts = cfg.get("timeout", {})
         self.t_connect = timeouts.get("connect", 15)
         self.t_expect = timeouts.get("expect", 15)
         self.t_cmd = timeouts.get("command", 60)
 
-        self.child: Optional[pexpect.spawn] = None
+        self.child: Optional[Any] = None
+        self.paramiko_client: Optional[Any] = None
+        self.paramiko_channel: Optional[Any] = None
         self.command_lock = threading.Lock()
 
     def connect(self) -> None:
+        if os.name == "nt":
+            self._connect_paramiko()
+            return
+
         cmd = [
             "ssh",
             "-tt",
@@ -155,14 +168,83 @@ class SSHJumpSession:
             child.close(force=True)
             raise
 
+    def _connect_paramiko(self) -> None:
+        import paramiko
+
+        if self.password is None:
+            raise RuntimeError("JumpServer requires password, but password is not configured")
+
+        for attr in ("_preferred_keys", "_preferred_pubkeys"):
+            preferred = getattr(paramiko.Transport, attr, ())
+            for algorithm in ("ssh-rsa", "ssh-dss"):
+                if algorithm not in preferred:
+                    preferred = preferred + (algorithm,)
+            setattr(paramiko.Transport, attr, preferred)
+        paramiko.Transport._key_info.setdefault("ssh-rsa", paramiko.RSAKey)
+        if hasattr(paramiko, "DSSKey"):
+            paramiko.Transport._key_info.setdefault("ssh-dss", paramiko.DSSKey)
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        login_user = self.js_user if self.target_selector else self.direct_user
+        client.connect(
+            hostname=self.host,
+            port=self.port,
+            username=login_user,
+            password=self.password,
+            timeout=self.t_connect,
+            banner_timeout=max(self.t_connect, self.t_expect),
+            auth_timeout=max(self.t_connect, self.t_expect),
+            look_for_keys=False,
+            allow_agent=False,
+        )
+
+        channel = client.invoke_shell(width=220, height=50)
+        channel.settimeout(0.2)
+        self.paramiko_client = client
+        self.paramiko_channel = channel
+        initial = self._read_paramiko_until_prompt(self.t_expect)
+        if self.target_selector:
+            selector = str(self.target_selector)
+            if not selector.startswith(":"):
+                channel.sendall(":")
+                time.sleep(0.2)
+                channel.sendall(selector + "\r")
+            else:
+                channel.sendall(selector + "\r")
+            initial += self._read_paramiko_until_prompt(self.t_expect)
+            if not self._looks_like_prompt(initial):
+                channel.sendall("\r")
+                initial += self._read_paramiko_until_prompt(self.t_expect)
+        if not self._looks_like_prompt(initial):
+            self.close()
+            raise RuntimeError(f"SSH connection did not reach a shell prompt: {initial.strip()}")
+
+    @staticmethod
+    def _resolve_target_selector(cfg: dict[str, Any], target_ip: str, target_user: str) -> Optional[str]:
+        for host in cfg.get("allowed_hosts", []):
+            if host.get("ip") == target_ip and host.get("user", "root") == target_user:
+                selector = host.get("selector") or host.get("asset_id") or host.get("node")
+                return str(selector) if selector is not None else None
+        return None
+
     def is_alive(self) -> bool:
+        if self.paramiko_channel:
+            return not self.paramiko_channel.closed
         return bool(self.child and self.child.isalive())
 
     def close(self) -> None:
+        if self.paramiko_channel:
+            self.paramiko_channel.close()
+        if self.paramiko_client:
+            self.paramiko_client.close()
         if self.child:
             self.child.close(force=True)
 
     def exec_command(self, command: str) -> dict[str, Any]:
+        if self.paramiko_channel:
+            return self._exec_paramiko(command)
+
         if not self.child or not self.is_alive():
             raise RuntimeError("session 已断开")
 
@@ -197,6 +279,74 @@ class SSHJumpSession:
                 "exit_code": exit_code,
                 "alive": self.is_alive(),
             }
+
+    def _exec_paramiko(self, command: str) -> dict[str, Any]:
+        if not self.paramiko_channel or not self.is_alive():
+            raise RuntimeError("session disconnected")
+
+        with self.command_lock:
+            token = uuid.uuid4().hex
+            marker_prefix = "__JUMP"
+            exit_suffix = f"_EXIT__ {token}"
+            end_suffix = f"_END__ {token}"
+            end_marker = f"__JUMP_END__ {token}"
+            full_cmd = (
+                f"{command}; "
+                "__jump_ssh_exit=$?; "
+                f"printf '{marker_prefix}''{exit_suffix} %s\\n' \"$__jump_ssh_exit\"; "
+                f"printf '{marker_prefix}''{end_suffix}\\n'"
+            )
+
+            self.paramiko_channel.sendall(full_cmd + "\n")
+            raw = self._read_paramiko_until(end_marker, self.t_cmd)
+            self._read_paramiko_until_prompt(0.5)
+            output, exit_code = self._clean(raw, command, token)
+            return {
+                "command": command,
+                "output": output,
+                "exit_code": exit_code,
+                "alive": self.is_alive(),
+            }
+
+    def _read_paramiko_until(self, marker: str, timeout: float) -> str:
+        if not self.paramiko_channel:
+            return ""
+
+        chunks: list[str] = []
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.paramiko_channel.recv_ready():
+                data = self.paramiko_channel.recv(65535).decode("utf-8", errors="replace")
+                chunks.append(data)
+                combined = "".join(chunks)
+                if marker in combined:
+                    return combined
+                continue
+            if self.paramiko_channel.closed:
+                raise RuntimeError(f"session disconnected: {''.join(chunks).strip()}")
+            time.sleep(0.05)
+        raise TimeoutError(f"command timed out: {''.join(chunks).strip()}")
+
+    def _read_paramiko_until_prompt(self, timeout: float) -> str:
+        if not self.paramiko_channel:
+            return ""
+
+        chunks: list[str] = []
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.paramiko_channel.recv_ready():
+                data = self.paramiko_channel.recv(65535).decode("utf-8", errors="replace")
+                chunks.append(data)
+                combined = "".join(chunks)
+                if self._looks_like_prompt(combined):
+                    return combined
+                continue
+            time.sleep(0.05)
+        return "".join(chunks)
+
+    @staticmethod
+    def _looks_like_prompt(output: str) -> bool:
+        return bool(re.search(r"[$#]\s*$", output.rstrip()))
 
     def _drain_prompt(self) -> None:
         if not self.child or not self.is_alive():
@@ -343,7 +493,10 @@ class SessionRequestHandler(socketserver.StreamRequestHandler):
         self.wfile.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
-class SessionServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+_UnixStreamServer = getattr(socketserver, "UnixStreamServer", socketserver.TCPServer)
+
+
+class SessionServer(socketserver.ThreadingMixIn, _UnixStreamServer):
     daemon_threads = True
     allow_reuse_address = True
 
