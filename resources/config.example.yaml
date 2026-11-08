@@ -1,44 +1,32 @@
+# Example only. Replace endpoints/accounts before use; never distribute config.yaml.
 jumpserver:
-  host: "192.168.3.1"
-  port: 22222
-  user: "your-username"
-#  password: "your-password"
+  host: "jump.example.com" # JumpServer SSH gateway, not its web URL
+  port: 2222 # Change to the gateway SSH port configured by your administrator
+  user: "your-jumpserver-user"
 
-# 允许 Agent 访问的服务器白名单（必须配置，不在列表内的服务器拒绝访问）
+  # Mode A: public-key/passwordless login. Public key must be authorized in JumpServer.
+  auth_mode: "key"
+  # private_key: "~/.ssh/id_ed25519" # Optional; otherwise discover keys/use SSH Agent
+  # key_passphrase_env: "JUMP_SSH_KEY_PASSPHRASE" # Only for an encrypted private key
+  allow_agent: true
+  look_for_keys: true
+
+  # Mode B: replace auth_mode above with "password" and enable ONE of these:
+  # password_env: "JUMP_SSH_PASSWORD" # Read from the current process environment
+  # password: "replace-locally" # Local-only alternative; never publish this value
+
+  # Optional; default ~/.ssh/known_hosts. Non-default ports use [host]:port entries.
+  # known_hosts: "~/.ssh/known_hosts"
+
 allowed_hosts:
-  - name: "dev" # 显示名称（任意）
-    ip: "192.168.1.100" # 目标机器的内网IP或直连主机名
-    user: "root" # 登录目标机器的用户名（堡垒机直连时拼接，如 root）
-    default_workdir: "~/workspace" # 默认工作目录（可选），未指定 --workdir 时会进入此目录
-  - name: "test"
-    ip: "192.168.1.101"
-    user: "root"
-  - name: "test2"
-    ip: "192.168.1.102"
-    user: "root"
+  - name: "dev-1" # CLI --host alias, unique ignoring case
+    ip: "192.0.2.10" # Documentation address: replace with asset address in JumpServer
+    user: "deploy" # Authorized target-system account, NOT the JumpServer username
+    # default_workdir: "/opt/app" # Optional; must exist on target; ~/app is supported
+    # selector: "asset-identifier" # Optional menu compatibility mode; see reference
 
 timeout:
-  connect: 15 # SSH 连接超时（秒）
-  expect: 10 # 等待 JumpServer 交互响应超时（秒）
-  command: 60 # 单条命令执行超时（秒）
-
-# 可选：本地工具路径
-tools:
-  woodpecker_watch_dir: "/mnt/woodpecker-watch"
-
-# 可选：给 woodpecker-verify 子命令复用的配置
-woodpecker:
-  server: "https://woodpecker.example.com"
-  token: "your-woodpecker-token"
-
-kubernetes:
-  # 可选；不填时使用目标服务器上 kubectl 当前默认 context
-  kubectlContext: "prod-cluster"
-
-defaults:
-  namespace: "prod"
-  timeoutSeconds: 900
-  pollIntervalSeconds: 10
-
-image:
-  repositoryTemplate: "registry.example.com/{serviceName}"
+  connect: 15 # TCP connection phase, seconds
+  expect: 15 # Each SSH handshake/auth/channel/prompt phase, seconds
+  command: 60 # Each remote command wait, seconds; timeout does not prove cancellation
+  idle: 900 # Inactive persistent-session lifetime, seconds (POSIX only)

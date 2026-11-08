@@ -1,5 +1,5 @@
 interface:
   display_name: "Jump SSH"
-  short_description: "通过 JumpServer 执行远程命令并串联发版流程"
+  short_description: "通过 JumpServer 安全访问白名单服务器，支持密码和 SSH 密钥认证"
   icon_small: "./assets/jump-ssh-logo.png"
   icon_large: "./assets/jump-ssh-logo.svg"

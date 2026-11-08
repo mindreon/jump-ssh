@@ -1,18 +1,28 @@
 ---
 name: jump-ssh
-version: "1.0.0"
+version: "2.0.0"
 display_name: "JumpServer 远程运维"
 display_name_en: "JumpServer Remote Operations"
-description: "通过 JumpServer 堡垒机在用户配置的白名单服务器上执行远程命令。适用于远程排障、服务启停、发版和 Woodpecker/Kubernetes 更新校验。"
-description_zh: "通过 JumpServer 堡垒机在用户配置的白名单服务器上执行远程命令。适用于远程排障、服务启停、发版和 Woodpecker/Kubernetes 更新校验。"
-description_en: "Run remote commands on user-configured allowlisted servers through JumpServer. Use for remote troubleshooting, service management, deployment, and Woodpecker/Kubernetes update verification."
+description: "通过 JumpServer 在用户配置的白名单服务器上执行命令。适用于远程排障和经授权的运维操作，支持密码、SSH 私钥和 SSH Agent 认证。"
+description_zh: "通过 JumpServer 在用户配置的白名单服务器上执行命令。适用于远程排障和经授权的运维操作，支持密码、SSH 私钥和 SSH Agent 认证。"
+description_en: "Run commands on user-allowlisted servers through JumpServer for remote troubleshooting and authorized operations, with password, SSH private-key, or SSH Agent authentication."
 ---
 
-# jump-ssh Skill
+# Jump SSH
 
-## 执行规则
+通用 JumpServer SSH 客户端。仅访问配置中已有的主机，不假设任何公司仓库、镜像仓库、部署脚本、集群或目录。
 
-以当前加载的 `SKILL.md` 所在目录作为 skill 根目录，不要依赖当前工作目录。以下示例使用 Codex 默认安装位置；若实际位置不同，将 `AGENT_SKILL_DIR` 设置为实际根目录。
+## 使用边界
+
+- Python 3.10+；Windows、Linux、macOS 均支持 `doctor`、`list`、`exec`。
+- 持久 `session-*` 仅支持 Linux、macOS、WSL。原生 Windows 使用 `exec`；可把相关命令合并到一次执行。
+- 目标机器必须提供 POSIX shell，初始提示符以 `$` 或 `#` 结尾，并支持 `stty`、`printf`、`eval`。不支持目标 Windows PowerShell、交互式编辑器、自动 MFA/验证码输入。
+- 默认使用 JumpServer 直连用户名 `堡垒机用户@目标用户@目标IP`。免密指 SSH 公钥认证，不是匿名登录；目标系统账号仍需在 JumpServer 授权。
+- 先读本文件完成首次设置；详细认证、主机密钥、全部配置项和排错见 [configuration.md](references/configuration.md)。只有需要保留 shell 状态时才读 [sessions.md](references/sessions.md)。
+
+## 首次安装与配置
+
+以**当前加载的本文件所在目录**为根目录。以下默认路径仅适用于常规 Codex 安装；自定义安装时先设置 `AGENT_SKILL_DIR`。始终通过绝对脚本路径调用，不依赖当前项目目录。
 
 ### Windows PowerShell
 
@@ -24,317 +34,88 @@ $SkillDir = if ($env:AGENT_SKILL_DIR) {
 } else {
     Join-Path $env:USERPROFILE ".codex/skills/jump-ssh"
 }
-$PythonBin = if ($env:PYTHON_BIN) { $env:PYTHON_BIN } else { "python" }
-$JumpSshScript = Join-Path $SkillDir "scripts/jump_ssh.py"
-if (-not (Test-Path -LiteralPath $JumpSshScript -PathType Leaf)) {
-    throw "jump-ssh script not found: $JumpSshScript"
+python -m venv (Join-Path $SkillDir ".venv")
+$PythonBin = Join-Path $SkillDir ".venv/Scripts/python.exe"
+$Script = Join-Path $SkillDir "scripts/jump_ssh.py"
+& $PythonBin -m pip install -r (Join-Path $SkillDir "requirements.txt")
+$Config = Join-Path $SkillDir "resources/config.yaml"
+if (-not (Test-Path -LiteralPath $Config)) {
+    Copy-Item -LiteralPath (Join-Path $SkillDir "resources/config.example.yaml") -Destination $Config
 }
-
-& $PythonBin $JumpSshScript list
-& $PythonBin $JumpSshScript exec --host "VM-4-13" --cmd "df -h"
 ```
 
 ### Bash（Linux / macOS / WSL）
 
 ```bash
 SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-
-# 可选：先确认脚本存在
-test -f "$SKILL_DIR/scripts/jump_ssh.py"
-```
-
-后续示例采用 Bash 语法。PowerShell 中使用 `& $PythonBin $JumpSshScript` 调用同一脚本，参数保持一致；不要直接复制 Bash 的变量赋值和反斜杠续行语法。
-
-## 前置配置
-
-**第一步：安装依赖**
-
-仅在依赖尚未安装时执行：
-
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" -m pip install -r "$SKILL_DIR/requirements.txt"
-```
-
-**第二步：创建配置文件**
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
+python3 -m venv "$SKILL_DIR/.venv"
+PYTHON_BIN="$SKILL_DIR/.venv/bin/python"
+SCRIPT="$SKILL_DIR/scripts/jump_ssh.py"
+"$PYTHON_BIN" -m pip install -r "$SKILL_DIR/requirements.txt"
 if [ ! -e "$SKILL_DIR/resources/config.yaml" ]; then
-  cp "$SKILL_DIR/resources/config.example.yaml" "$SKILL_DIR/resources/config.yaml"
+  (umask 077; cp "$SKILL_DIR/resources/config.example.yaml" "$SKILL_DIR/resources/config.yaml")
 fi
 ```
 
-PowerShell 对应操作（沿用前文的变量）：
+已有可用虚拟环境时复用，不重复创建。Linux 缺少 `venv` 时先安装发行版提供的 Python venv 组件。
 
-```powershell
-& $PythonBin -m pip install -r (Join-Path $SkillDir "requirements.txt")
-$ConfigPath = Join-Path $SkillDir "resources/config.yaml"
-if (-not (Test-Path -LiteralPath $ConfigPath)) {
-    Copy-Item -LiteralPath (Join-Path $SkillDir "resources/config.example.yaml") -Destination $ConfigPath
-}
-```
+接着由用户填写本地 `resources/config.yaml`（或指定外部配置）：
 
-首次配置时编辑 `config.yaml`，填入 JumpServer 账号密码，并配置允许访问的服务器白名单。已配置的文件应继续使用，避免用示例覆盖。
+1. 设置 `jumpserver.host`、SSH 端口和 JumpServer 用户名；端口不是 Web 控制台的 HTTP/HTTPS 端口。
+2. **密码方式**：设置 `auth_mode: password`，选择 `password_env` 或 `password`；**免密方式**：设置 `auth_mode: key`，使用本地私钥、默认密钥或 SSH Agent，不填写 password。具体操作见配置参考。
+3. 在 `allowed_hosts` 中填写目标名称、地址、目标登录账号；这些不是 JumpServer 账号。
+4. 从管理员处验证 JumpServer SSH 主机公钥指纹，并准备 `known_hosts`。不要为方便自动接受未知主机密钥。
+5. 本地执行 `doctor` 和 `list`；用户授权连接后，再用 `exec --host dev-1 --cmd "printf 'connection-ok\n'; whoami; pwd"` 做只读连通性检查。把 `dev-1` 换成实际名称。
 
-```yaml
-jumpserver:
-  host: "10.0.0.1"
-  port: 2222
-  user: "your-username"
-  password: "your-password"
+`doctor` 不连接服务器，不能证明远端账号授权、公钥部署或网络可用。
 
-# 允许 Agent 访问的服务器白名单
-allowed_hosts:
-  - name: "VM-4-13"
-    ip: "192.168.1.100"
-    user: "root"
-    default_workdir: "/opt/falsework"
-```
+## 常用调用
 
-## 调用方式
-
-业务命令输出 JSON，方便 Agent 解析；`--help` 和命令行参数错误使用普通文本。示例中的服务器名、目录和服务名需要替换为实际配置。
-
-### 1. 列出允许访问的服务器
+以下沿用 Bash 初始化变量；PowerShell 把 `"$PYTHON_BIN" "$SCRIPT"` 替换为 `& $PythonBin $Script`，其余参数相同。
 
 ```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" list
+# 离线检查：配置、依赖、主机公钥、平台支持
+"$PYTHON_BIN" "$SCRIPT" doctor
+
+# 仅列出已有白名单，不搜索或发现远端服务器
+"$PYTHON_BIN" "$SCRIPT" list
+
+# 每次建立并关闭一个 SSH 连接
+"$PYTHON_BIN" "$SCRIPT" exec --host "dev-1" --cmd "df -h"
+
+# --workdir 优先于主机 default_workdir；允许绝对路径或 ~/ 相对远端主目录
+"$PYTHON_BIN" "$SCRIPT" exec --host "dev-1" --workdir "/opt/app" --cmd "pwd && ls -la"
+
+# --config 是全局参数，必须放在子命令前
+"$PYTHON_BIN" "$SCRIPT" --config "/path/to/config.yaml" doctor
 ```
 
-### 2. 在指定服务器上执行命令（无状态）
+远端命令为单个字符串，由远端 POSIX shell 解释。PowerShell 中含 `$` 的远端命令优先使用单引号，避免在本地展开。含密码或 token 的命令不要直接放在 CLI 参数中。
 
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" exec \
-  --host "VM-4-13" \
-  --cmd "df -h"
-```
+## 结果与耗时
 
-说明：
-- 每次调用都会新建并关闭一次远端 shell。
-- 适合单条命令、稳定自动化场景。
-- 输出包含 `output`，并额外带 `exit_code`。
+业务命令向 stdout 返回一个 JSON 对象；`--help` 和参数语法错误为普通文本。
 
-指定工作目录：
+- `success`：只有操作成功且远端退出码为 0 才为 true。
+- `output`：远端 PTY 文本，stdout/stderr 合并；ANSI 控制序列被去除，不适合二进制或逐字节传输。
+- `exit_code`：远端命令退出码；连接失败、超时、结果未知时不伪造为 0。
+- `elapsed_seconds`：当前 CLI 调用总耗时（包含配置、连接或本地 IPC 等待），以单调时钟计时。
+- CLI 退出码：成功 0，业务失败 1，参数错误 2。既检查 CLI 状态，也检查 JSON；不要仅凭“拿到输出”判断成功。
+- `timeout.connect`、`timeout.expect`、`timeout.command` 分别限制各连接、握手/提示符、命令阶段，不是同一个总时限。完整调用可能叠加多个阶段。
+- 超时会关闭对应 SSH 会话，但远端子进程可能仍在运行。不得自动重试部署、删除、重启等操作；先检查实际状态。
 
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" exec \
-  --host "VM-4-13" \
-  --workdir "/opt/myapp" \
-  --cmd "pwd && ls -la"
-```
+## 运维与安全
 
-### 3. 指定配置文件路径（可选）
+- 仅按用户请求执行操作；白名单是路由约束，不是 shell 沙箱，不能防止获准主机上的命令再次访问网络。
+- 部署与服务管理依照目标项目的实际说明，不默认执行 `git pull`、构建推送、重启或特定脚本。
+- 凭据留在本地配置、私钥或环境变量中，不要求用户在聊天中粘贴。Windows 限制配置 ACL，POSIX 使用 `chmod 600`。
+- 不输出配置文件全文；工具会隐藏异常中的已知认证秘密，但远端命令自己打印的敏感内容仍需避免。
+- 分发时仅包含 `SKILL.md`、`agents/`、`assets/`、`references/`、`scripts/jump_ssh.py`、`requirements.txt`、`resources/config.example.yaml`；可附 `tests/`。不要打包真实配置、密钥、`.env`、`.git`、虚拟环境或缓存。
 
-全局参数 `--config` 必须放在子命令之前。
+## 旧版迁移
 
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" \
-  --config /custom/path/config.yaml \
-  exec --host "VM-4-13" --cmd "uname -a"
-```
+2.0.0 移除绑定外部项目的 `woodpecker-verify` 和固定发布流程，避免安装技能后仍依赖未随包提供的内部代码。需要 CI 或 Kubernetes 检查时，根据用户环境使用已有工具或通过 `exec` 调用已安装的命令，不自动安装集群工具。
 
-### 4. 持久 session 模式
+所有平台统一使用 Paramiko；不读取 OpenSSH 的 `~/.ssh/config`。原先依赖 SSH Host 别名、IdentityFile 或跳板设置时，在 YAML 填写真实地址、端口和 `private_key`。保持 `identity_file`、`asset_id`、`node` 的配置别名，详见配置参考。
 
-适合需要保留 `cd`、环境变量、shell 上下文的连续命令场景。
-
-启动 session：
-
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-start \
-  --host "VM-4-13"
-```
-
-返回结果里会包含 `session_id`。
-
-在同一个 session 中连续执行：
-
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-exec \
-  --session "<session_id>" \
-  --cmd "cd /tmp && pwd"
-
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-exec \
-  --session "<session_id>" \
-  --cmd "pwd"
-```
-
-列出当前活跃 session：
-
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-list
-```
-
-关闭 session：
-
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" session-close \
-  --session "<session_id>"
-```
-
-说明：
-- `session-*` 通过本地 Unix socket daemon 维持远端终端，不会在每次调用后断开。
-- 持久 session 依赖 Python 的 Unix domain socket 支持；Windows 环境不支持时使用 WSL，或使用无状态 `exec`。
-- 输出仍然是 JSON，但只保留最小元信息：`session_id`、`output`、`exit_code`、`alive`。
-- 更适合排障、探索式操作、依赖上下文的连续命令。
-
-### 5. 标准发版流程（本地构建镜像 + 远程发布）
-
-用于“代码已修改，需要快速发版到开发环境”的场景。默认按以下顺序执行，避免只重启服务但镜像未更新：
-
-1. 在本地目标项目目录确认镜像构建/推送方式（先看 `Makefile`，不要硬编码目标）。
-2. 执行该项目的构建并推送镜像命令（通常是 `make <target>`）。
-3. 在 `falsework` 仓库更新对应服务部署脚本/镜像 tag。
-4. 使用 jump-ssh 到目标机器拉取最新 `falsework` 并重启服务。
-
-建议先做最小检查：
-
-```bash
-# 在项目根目录识别可用目标（按项目实际 Makefile 为准）
-rg -n "^(\.PHONY:|[a-zA-Z0-9_.-]+:)" Makefile
-rg -n "image|docker|build|push|publish" Makefile
-```
-
-本地构建推送（示例，目标名以项目 Makefile 为准）：
-
-```bash
-cd <project_dir>
-make <build-and-push-target>
-```
-
-更新 falsework 并远程发布（示例）：
-
-```bash
-# 1) 本地更新 falsework 部署脚本中的镜像 tag
-cd <falsework_dir>
-# 编辑对应部署文件，提交到目标分支
-
-# 2) 远程主机拉取并重启
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" exec \
-  --host "VM-4-13" \
-  --workdir "/opt/falsework" \
-  --cmd "git pull && ./run.sh restart <service_name>"
-```
-
-执行约束：
-- 发版请求默认包含“构建推送镜像 -> 更新 falsework -> 远程重启”全链路。
-- 若用户只要求“重启服务”，才跳过前置构建与部署脚本更新。
-
-### 6. 服务启停与部署
-
-如果在目标服务器上配置了 `default_workdir`，且未传 `--workdir`，会先进入该目录。`default_workdir` 和 `--workdir` 应使用远端绝对路径；当前脚本会对目录做 shell 转义，`~/falsework` 不会展开为用户主目录。
-
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-
-# 启动服务
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" exec \
-  --host "VM-4-13" \
-  --cmd "./run.sh start <service_name>"
-
-# 停止服务
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" exec \
-  --host "VM-4-13" \
-  --cmd "./run.sh stop <service_name>"
-
-# 更新并重启服务
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" exec \
-  --host "VM-4-13" \
-  --cmd "git pull && ./run.sh restart <service_name>"
-```
-
-### 7. 校验 Woodpecker 与 Kubernetes 是否完成更新
-
-适合“代码已推送，不想本地构建镜像，希望 Agent 自动判断是否已经真正更新好”的场景。
-
-该命令会：
-
-1. 查找指定 `repo + commit` 对应的 Woodpecker 流水线
-2. 等待流水线结束并确认 `success`
-3. 在目标服务器上执行 `kubectl`，查询 deployment 对应 Pod 的实际 `imageID`
-4. 在目标服务器上执行 `docker manifest inspect`，获取目标 tag 当前的 manifest digest 集合
-5. 判断 Pod 的 `imageID` digest 是否命中目标 manifest digest
-
-前置配置：
-
-本地需要可导入的 `woodpecker-watch` 项目及其 Python 依赖，目标服务器需要可用的 `kubectl` 和 `docker`。
-
-在 `config.yaml` 中补充以下配置段：
-
-```yaml
-tools:
-  woodpecker_watch_dir: "/mnt/data/code/mindreon/woodpecker-watch"
-
-woodpecker:
-  server: "https://woodpecker.example.com"
-  token: "your-woodpecker-token"
-
-kubernetes:
-  # 可选；不填时使用目标服务器上 kubectl 当前默认 context
-  kubectlContext: "prod-cluster"
-
-defaults:
-  namespace: "prod" # 目标 deployment 所在的 Kubernetes namespace
-  timeoutSeconds: 900
-  pollIntervalSeconds: 10
-
-image:
-  repositoryTemplate: "registry.example.com/{serviceName}"
-```
-
-调用方式：
-
-```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" woodpecker-verify \
-  --repo "mindreon/agentic-service" \
-  --commit "abc1234"
-```
-
-可选覆盖：
-
-```bash
-"${PYTHON_BIN:-python3}" "$SKILL_DIR/scripts/jump_ssh.py" woodpecker-verify \
-  --repo "mindreon/agentic-service" \
-  --commit "abc1234" \
-  --namespace "prod" \
-  --deployment "agentic-service" \
-  --container "agentic-service" \
-  --watch-dir "/mnt/data/code/mindreon/woodpecker-watch"
-```
-
-说明：
-- 默认按 `repo` 最后一段推导 deployment 名
-- 若白名单中配置了多台服务器，必须通过 `--host` 指定执行校验的目标；只有一台时自动选用该服务器
-- 默认按 Woodpecker 流水线分支/标签推导目标镜像 tag；例如 `release/v0.1.0 -> release-v0.1.0`
-- `defaults.namespace` 是目标 deployment 所在的 Kubernetes namespace
-- 不配置 `kubectlContext` 时，直接使用目标服务器上的 `kubectl` 默认 context
-- 若当前目录下存在 `woodpecker-watch` 项目目录，可不配 `tools.woodpecker_watch_dir`
-- 输出仍为 JSON，便于 Agent 继续解析
-
-## 参数说明
-
-| 参数 | 说明 |
-|------|------|
-| `--host` | 目标服务器名称，必须与 `allowed_hosts[].name` 匹配（不区分大小写） |
-| `--cmd` | 在目标服务器执行的 shell 命令 |
-| `--config` | 配置文件路径（可选，默认使用 `resources/config.yaml`） |
-| `--workdir` | 工作目录（可选；未指定时优先使用 `default_workdir`） |
-| `--session` | 持久 session ID（仅 `session-exec` / `session-close` 使用） |
-
-## 安全约束
-
-- `--host` 必须在 `config.yaml` 的 `allowed_hosts` 中，否则报错。
-- Agent 不能自行发现服务器，只能访问用户配置的白名单。
-- 敏感凭据保存在本地 `config.yaml` 中。
-- 不在回复、日志或提交中输出密码、私钥或 token；配置示例仅使用占位值。
-- `session-*` 模式会在本地保留常驻 daemon；用完应调用 `session-close` 回收会话。
+默认严格校验主机公钥，不再忽略 host key 错误，也不强行开启过时算法。旧的持久会话需先在旧版本关闭，新版不复用旧协议会话。已有真实配置不会自动改写。

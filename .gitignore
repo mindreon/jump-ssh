@@ -4,3 +4,10 @@ resource/config
 resource/config/
 .idea
 .vscode
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.pem
+*.key
+*.zip

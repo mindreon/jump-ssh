@@ -1,3 +1,2 @@
-pexpect>=4.9.0
 PyYAML>=6.0
-paramiko<4
+paramiko>=3.4,<4
