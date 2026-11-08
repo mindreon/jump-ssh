@@ -94,6 +94,7 @@ class SSHJumpSession:
         self.port = int(js["port"])
         self.js_user = js["user"]
         self.password = js.get("password")
+        self.private_key = js.get("private_key") or js.get("identity_file")
         self.direct_user = f"{self.js_user}@{target_user}@{target_ip}"
         self.target_ip = target_ip
         self.target_user = target_user
@@ -171,9 +172,6 @@ class SSHJumpSession:
     def _connect_paramiko(self) -> None:
         import paramiko
 
-        if self.password is None:
-            raise RuntimeError("JumpServer requires password, but password is not configured")
-
         for attr in ("_preferred_keys", "_preferred_pubkeys"):
             preferred = getattr(paramiko.Transport, attr, ())
             for algorithm in ("ssh-rsa", "ssh-dss"):
@@ -192,11 +190,12 @@ class SSHJumpSession:
             port=self.port,
             username=login_user,
             password=self.password,
+            key_filename=self.private_key,
             timeout=self.t_connect,
             banner_timeout=max(self.t_connect, self.t_expect),
             auth_timeout=max(self.t_connect, self.t_expect),
-            look_for_keys=False,
-            allow_agent=False,
+            look_for_keys=self.password is None,
+            allow_agent=self.password is None,
         )
 
         channel = client.invoke_shell(width=220, height=50)

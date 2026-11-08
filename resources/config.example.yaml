@@ -6,14 +6,14 @@ jumpserver:
 
 # 允许 Agent 访问的服务器白名单（必须配置，不在列表内的服务器拒绝访问）
 allowed_hosts:
-  - name: "VM-4-13" # 显示名称（任意）
+  - name: "dev" # 显示名称（任意）
     ip: "192.168.1.100" # 目标机器的内网IP或直连主机名
     user: "root" # 登录目标机器的用户名（堡垒机直连时拼接，如 root）
-    default_workdir: "~/falsework" # 默认工作目录（可选），未指定 --workdir 时会进入此目录
-  - name: "IDC-2080"
+    default_workdir: "~/workspace" # 默认工作目录（可选），未指定 --workdir 时会进入此目录
+  - name: "test"
     ip: "192.168.1.101"
     user: "root"
-  - name: "jenkins-arm"
+  - name: "test2"
     ip: "192.168.1.102"
     user: "root"
 
@@ -24,7 +24,7 @@ timeout:
 
 # 可选：本地工具路径
 tools:
-  woodpecker_watch_dir: "/mnt/data/code/mindreon/woodpecker-watch"
+  woodpecker_watch_dir: "/mnt/woodpecker-watch"
 
 # 可选：给 woodpecker-verify 子命令复用的配置
 woodpecker:
