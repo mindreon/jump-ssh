@@ -1,16 +1,26 @@
 ---
 name: jump-ssh
-version: "2.0.0"
+version: "2.0.1"
 display_name: "JumpServer 远程运维"
 display_name_en: "JumpServer Remote Operations"
-description: "通过 JumpServer 在用户配置的白名单服务器上执行命令。适用于远程排障和经授权的运维操作，支持密码、SSH 私钥和 SSH Agent 认证。"
-description_zh: "通过 JumpServer 在用户配置的白名单服务器上执行命令。适用于远程排障和经授权的运维操作，支持密码、SSH 私钥和 SSH Agent 认证。"
-description_en: "Run commands on user-allowlisted servers through JumpServer for remote troubleshooting and authorized operations, with password, SSH private-key, or SSH Agent authentication."
+description: "面向具备文件读取和 Python 命令执行能力的智能体，通过 JumpServer 在用户配置的白名单服务器上执行命令。适用于远程排障和经授权的运维操作，支持密码、SSH 私钥和 SSH Agent 认证，不绑定特定智能体平台。"
+description_zh: "面向具备文件读取和 Python 命令执行能力的智能体，通过 JumpServer 在用户配置的白名单服务器上执行命令。适用于远程排障和经授权的运维操作，支持密码、SSH 私钥和 SSH Agent 认证，不绑定特定智能体平台。"
+description_en: "Platform-independent skill for agents with file access and Python command execution to run commands on user-allowlisted servers through JumpServer. Use for remote troubleshooting and authorized operations with password, SSH private-key, or SSH Agent authentication."
 ---
 
 # Jump SSH
 
 通用 JumpServer SSH 客户端。仅访问配置中已有的主机，不假设任何公司仓库、镜像仓库、部署脚本、集群或目录。
+
+## 智能体兼容性声明
+
+本技能不绑定特定智能体厂商、模型或安装目录。任何能够读取本技能说明、执行 Python CLI，并在用户授权范围内访问配置和 JumpServer 网络的智能体，都可以按本文调用；普通用户也可直接通过终端使用。
+
+- 支持技能包的宿主：按该宿主的安装方式导入整个技能包，保留相对目录结构。
+- 不支持技能包的宿主：让智能体读取 `SKILL.md` 和所需参考文档，再通过其命令执行工具调用 `scripts/jump_ssh.py`。
+- `agents/openai.yaml` 仅为识别此文件的宿主提供名称和图标等可选展示信息，不是运行依赖，也不限制其他智能体使用。
+- 平台无关不等于所有平台都已实测或都能零配置运行。纯聊天、禁止执行脚本或无法提供必要网络访问的环境不能直接使用。
+- 云端或沙箱宿主中的“本地”是指脚本实际执行环境，不是用户电脑；配置、私钥、SSH Agent 和网络可达性必须在该环境中由用户授权提供。不要默认上传用户电脑的凭据，也不要假设云端能访问公司内网。
 
 ## 使用边界
 
@@ -22,17 +32,18 @@ description_en: "Run commands on user-allowlisted servers through JumpServer for
 
 ## 首次安装与配置
 
-以**当前加载的本文件所在目录**为根目录。以下默认路径仅适用于常规 Codex 安装；自定义安装时先设置 `AGENT_SKILL_DIR`。始终通过绝对脚本路径调用，不依赖当前项目目录。
+以**当前加载的本文件所在目录**为根目录，不猜测任何平台的默认技能目录。先将以下示例中的 `AGENT_SKILL_DIR` 设置为该目录的实际绝对路径，再执行安装。这个变量只是本文约定的路径传入方式，不要求宿主自动提供；也可直接给 `$SkillDir` / `SKILL_DIR` 赋实际路径。始终通过绝对脚本路径调用，不依赖当前项目目录。
 
 ### Windows PowerShell
 
 ```powershell
-$SkillDir = if ($env:AGENT_SKILL_DIR) {
-    $env:AGENT_SKILL_DIR
-} elseif ($env:CODEX_HOME) {
-    Join-Path $env:CODEX_HOME "skills/jump-ssh"
-} else {
-    Join-Path $env:USERPROFILE ".codex/skills/jump-ssh"
+# 先设置实际路径，例如：$env:AGENT_SKILL_DIR = "C:/tools/jump-ssh"
+$SkillDir = $env:AGENT_SKILL_DIR
+if (-not $SkillDir -or $SkillDir -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') {
+    throw "Set AGENT_SKILL_DIR to the absolute directory containing SKILL.md."
+}
+if (-not (Test-Path -LiteralPath (Join-Path $SkillDir "scripts/jump_ssh.py") -PathType Leaf)) {
+    throw "jump-ssh script not found in AGENT_SKILL_DIR."
 }
 python -m venv (Join-Path $SkillDir ".venv")
 $PythonBin = Join-Path $SkillDir ".venv/Scripts/python.exe"
@@ -47,7 +58,16 @@ if (-not (Test-Path -LiteralPath $Config)) {
 ### Bash（Linux / macOS / WSL）
 
 ```bash
-SKILL_DIR="${AGENT_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/jump-ssh}"
+# 先设置实际路径，例如：export AGENT_SKILL_DIR="/opt/skills/jump-ssh"
+SKILL_DIR="${AGENT_SKILL_DIR:?Set AGENT_SKILL_DIR to the absolute directory containing SKILL.md.}"
+case "$SKILL_DIR" in
+  /*) ;;
+  *) printf '%s\n' "AGENT_SKILL_DIR must be an absolute path." >&2; exit 1 ;;
+esac
+if [ ! -f "$SKILL_DIR/scripts/jump_ssh.py" ]; then
+  printf '%s\n' "jump-ssh script not found in AGENT_SKILL_DIR." >&2
+  exit 1
+fi
 python3 -m venv "$SKILL_DIR/.venv"
 PYTHON_BIN="$SKILL_DIR/.venv/bin/python"
 SCRIPT="$SKILL_DIR/scripts/jump_ssh.py"
@@ -58,6 +78,8 @@ fi
 ```
 
 已有可用虚拟环境时复用，不重复创建。Linux 缺少 `venv` 时先安装发行版提供的 Python venv 组件。
+
+若宿主将技能包挂载为只读，将虚拟环境建在该执行环境的用户可写目录，调整 `PythonBin` / `PYTHON_BIN` 指向它，并通过 `--config` 使用包外配置；脚本路径仍指向技能包。如果宿主既不能安装依赖，也没有预装依赖，则应报告环境不满足要求，而不是声称配置已完成。
 
 接着由用户填写本地 `resources/config.yaml`（或指定外部配置）：
 
