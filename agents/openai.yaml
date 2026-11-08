@@ -1,3 +1,5 @@
 interface:
   display_name: "Jump SSH"
   short_description: "通过 JumpServer 执行远程命令并串联发版流程"
+  icon_small: "./assets/jump-ssh-logo.png"
+  icon_large: "./assets/jump-ssh-logo.svg"

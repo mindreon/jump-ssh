@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Jump SSH</title>
+  <desc id="desc">A mint bastion gateway with a command-line chevron and cursor on a dark rounded tile.</desc>
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="#10252E"/>
+  <rect x="25" y="25" width="462" height="462" rx="111" fill="none" stroke="#24414B" stroke-width="2"/>
+  <path fill="#51DFC2" fill-rule="evenodd" d="M104 120H164V168H226V120H286V168H348V120H408V368Q408 400 376 400H136Q104 400 104 368ZM156 208Q144 208 144 220V348Q144 360 156 360H356Q368 360 368 348V220Q368 208 356 208Z"/>
+  <path d="M184 240L224 280L184 320" fill="none" stroke="#F2FCFA" stroke-width="20" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M268 320H316" fill="none" stroke="#F2FCFA" stroke-width="20" stroke-linecap="square"/>
+</svg>
